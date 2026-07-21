@@ -1,0 +1,1417 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>自動蓋章機器人 - Auto-Stamper Robot</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Noto+Sans+TC:wght@400;500;700;900&family=Noto+Serif+TC:wght@600;900&display=swap" rel="stylesheet">
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        body {
+            font-family: 'Inter', 'Noto Sans TC', sans-serif;
+        }
+        .stamp-font-kai {
+            font-family: 'DFKai-SB', 'Noto Serif TC', serif;
+        }
+        /* Custom scrollbar for control panel */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(30, 41, 59, 0.5);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.3);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(148, 163, 184, 0.5);
+        }
+        /* Robotic piston animation effects */
+        @keyframes slam {
+            0% { transform: translate(-50%, -50%) scale(1.4); opacity: 0.7; filter: brightness(1.5); }
+            70% { transform: translate(-50%, -50%) scale(0.95); opacity: 1; filter: brightness(1); }
+            100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+        }
+        .animate-slam {
+            animation: slam 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        /* Stamp target reticle pulse */
+        @keyframes pulse-ring {
+            0% { transform: scale(0.6); opacity: 0; }
+            50% { opacity: 0.5; }
+            100% { transform: scale(1.2); opacity: 0; }
+        }
+        .pulse-ring {
+            animation: pulse-ring 1.5s cubic-bezier(0.215, 0.610, 0.355, 1) infinite;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 h-full flex flex-col overflow-hidden select-none">
+
+    <script>
+        // Web Audio API Sound Generator for Robotic/Pneumatic Stamping Sounds
+        class AudioSynth {
+            constructor() {
+                this.ctx = null;
+                this.muted = false;
+            }
+
+            init() {
+                if (!this.ctx) {
+                    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+            }
+
+            playStampingSound() {
+                if (this.muted) return;
+                this.init();
+                if (this.ctx.state === 'suspended') {
+                    this.ctx.resume();
+                }
+
+                const now = this.ctx.currentTime;
+                
+                // 1. Pneumatic Air Release (Pssss-t)
+                const bufferSize = this.ctx.sampleRate * 0.25; // 0.25 seconds
+                const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+                const data = buffer.getChannelData(0);
+                for (let i = 0; i < bufferSize; i++) {
+                    data[i] = Math.random() * 2 - 1;
+                }
+
+                const noise = this.ctx.createBufferSource();
+                noise.buffer = buffer;
+
+                const noiseFilter = this.ctx.createBiquadFilter();
+                noiseFilter.type = 'bandpass';
+                noiseFilter.frequency.setValueAtTime(1000, now);
+                noiseFilter.frequency.exponentialRampToValueAtTime(150, now + 0.2);
+                noiseFilter.Q.value = 3.0;
+
+                const noiseGain = this.ctx.createGain();
+                noiseGain.gain.setValueAtTime(0.3, now);
+                noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.22);
+
+                noise.connect(noiseFilter);
+                noiseFilter.connect(noiseGain);
+                noiseGain.connect(this.ctx.destination);
+
+                // 2. Heavy Clank Impact (Metallic thump)
+                const osc = this.ctx.createOscillator();
+                const oscGain = this.ctx.createGain();
+
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(120, now);
+                osc.frequency.exponentialRampToValueAtTime(40, now + 0.12);
+
+                oscGain.gain.setValueAtTime(0.8, now);
+                oscGain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+
+                // Add a low-pass filter to dampen the sawtooth clickyness
+                const lp = this.ctx.createBiquadFilter();
+                lp.type = 'lowpass';
+                lp.frequency.setValueAtTime(300, now);
+
+                osc.connect(lp);
+                lp.connect(oscGain);
+                oscGain.connect(this.ctx.destination);
+
+                // Start playback
+                noise.start(now);
+                osc.start(now);
+
+                noise.stop(now + 0.25);
+                osc.stop(now + 0.16);
+            }
+
+            playClick() {
+                if (this.muted) return;
+                this.init();
+                const now = this.ctx.currentTime;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(600, now);
+                osc.frequency.exponentialRampToValueAtTime(300, now + 0.05);
+                
+                gain.gain.setValueAtTime(0.15, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.06);
+                
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start(now);
+                osc.stop(now + 0.06);
+            }
+        }
+
+        const audioSynth = new AudioSynth();
+    </script>
+
+    <!-- Top Nav Header -->
+    <header class="flex justify-between items-center px-6 py-4 bg-slate-900 border-b border-slate-800 shadow-md">
+        <div class="flex items-center gap-3">
+            <div class="p-2.5 bg-red-600 rounded-lg shadow-lg shadow-red-600/30 text-white animate-pulse">
+                <i class="fa-solid fa-robot text-xl"></i>
+            </div>
+            <div>
+                <h1 class="text-lg font-bold tracking-wider text-white flex items-center gap-2">
+                    自動蓋章機器人 <span class="text-xs px-2 py-0.5 bg-slate-800 text-red-400 rounded-full border border-red-500/30">Auto-Stamper v2.6</span>
+                </h1>
+                <p class="text-xs text-slate-400">高效精準的自動蓋印控制中心 & 模擬系統</p>
+            </div>
+        </div>
+        
+        <!-- Quick stats / actions -->
+        <div class="flex items-center gap-4">
+            <div class="hidden md:flex gap-4 text-xs">
+                <div class="bg-slate-950 px-3 py-1.5 rounded-md border border-slate-800 flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+                    <span class="text-slate-400">機械狀態:</span>
+                    <span id="status-text" class="text-emerald-400 font-semibold">隨時待命 (IDLE)</span>
+                </div>
+                <div class="bg-slate-950 px-3 py-1.5 rounded-md border border-slate-800 flex items-center gap-2">
+                    <span class="text-slate-400">總印记數:</span>
+                    <span id="stamp-counter" class="text-slate-200 font-bold">0</span>
+                </div>
+            </div>
+            
+            <button id="mute-btn" class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors" title="切換音效">
+                <i class="fa-solid fa-volume-high" id="mute-icon"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <div class="flex-1 flex overflow-hidden flex-col lg:flex-row">
+        
+        <!-- Left Column: Robot Controls & Customize Panel -->
+        <aside class="w-full lg:w-96 bg-slate-900 border-r border-slate-800 flex flex-col h-1/2 lg:h-full overflow-y-auto">
+            
+            <!-- Quick instructions -->
+            <div class="p-4 bg-slate-800/40 border-b border-slate-800 text-xs text-slate-300">
+                <span class="text-red-400 font-bold"><i class="fa-solid fa-circle-info mr-1"></i> 操作提示：</span> 
+                設定右方印章內容後，直接在畫布上點擊手動蓋章，或啟動「機器人自動化」功能進行高效率量產。
+            </div>
+
+            <!-- Tab Buttons -->
+            <div class="flex border-b border-slate-800 bg-slate-950 text-sm font-semibold sticky top-0 z-10">
+                <button id="tab-stamp-btn" class="flex-1 py-3 px-4 border-b-2 border-red-500 text-red-500 flex items-center justify-center gap-2">
+                    <i class="fa-solid fa-stamp"></i> 印章配置
+                </button>
+                <button id="tab-robot-btn" class="flex-1 py-3 px-4 border-b-2 border-transparent text-slate-400 hover:text-slate-300 flex items-center justify-center gap-2">
+                    <i class="fa-solid fa-gears"></i> 機器人自動化
+                </button>
+            </div>
+
+            <!-- TAB 1 CONTENT: STAMP SETTINGS -->
+            <div id="tab-stamp-content" class="p-5 space-y-5 flex-1">
+                
+                <!-- Stamp Text Configurator -->
+                <div>
+                    <label class="block text-xs font-semibold tracking-wider text-slate-400 uppercase mb-2">印章文字內容</label>
+                    <div class="space-y-3 bg-slate-950 p-3.5 rounded-lg border border-slate-800/80">
+                        <div>
+                            <span class="text-[10px] text-slate-500 block mb-1">職稱 / 第一行 (橫式)</span>
+                            <input type="text" id="stamp-title" class="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-sm text-white focus:outline-none focus:border-red-500 transition-all" value="資訊人員">
+                        </div>
+                        <div>
+                            <span class="text-[10px] text-slate-500 block mb-1">姓名 / 第二行 (橫式)</span>
+                            <input type="text" id="stamp-name" class="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-sm text-white focus:outline-none focus:border-red-500 transition-all" value="某某某">
+                        </div>
+                        <div class="flex items-center justify-between pt-1">
+                            <span class="text-[10px] text-slate-400">印章排列格式</span>
+                            <select id="stamp-layout" class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:outline-none">
+                                <option value="single-row" selected>單排並列 (橫式簡便)</option>
+                                <option value="double-row">雙排分行 (橫式經典)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Stamp Styling -->
+                <div>
+                    <label class="block text-xs font-semibold tracking-wider text-slate-400 uppercase mb-2">外觀與形狀</label>
+                    <div class="space-y-3 bg-slate-950 p-4 rounded-lg border border-slate-800">
+                        <!-- Shape Display & Dimensions -->
+                        <div class="flex gap-4">
+                            <div class="flex-1">
+                                <span class="text-[10px] text-slate-500 block mb-1">寬度 (px)</span>
+                                <input type="range" id="stamp-width" min="80" max="220" step="5" value="180" class="w-full accent-red-500">
+                                <div class="flex justify-between text-[10px] text-slate-400 mt-1">
+                                    <span>最小</span>
+                                    <span id="stamp-width-val" class="text-red-400 font-mono">180</span>
+                                </div>
+                            </div>
+                            <div class="flex-1">
+                                <span class="text-[10px] text-slate-500 block mb-1">高度 (px)</span>
+                                <input type="range" id="stamp-height" min="40" max="120" step="5" value="60" class="w-full accent-red-500">
+                                <div class="flex justify-between text-[10px] text-slate-400 mt-1">
+                                    <span>最小</span>
+                                    <span id="stamp-height-val" class="text-red-400 font-mono">60</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Border thickness and corner roundness -->
+                        <div class="grid grid-cols-2 gap-3 pt-2">
+                            <div>
+                                <span class="text-[10px] text-slate-500 block mb-1">邊框粗細</span>
+                                <input type="range" id="stamp-border" min="2" max="8" step="1" value="4" class="w-full accent-red-500">
+                                <span id="stamp-border-val" class="text-[10px] text-slate-400 block text-right">4px</span>
+                            </div>
+                            <div>
+                                <span class="text-[10px] text-slate-500 block mb-1">圓角大小</span>
+                                <input type="range" id="stamp-radius" min="0" max="25" step="1" value="8" class="w-full accent-red-500">
+                                <span id="stamp-radius-val" class="text-[10px] text-slate-400 block text-right">8px</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Stamp Physics (Fidelity) -->
+                <div>
+                    <label class="block text-xs font-semibold tracking-wider text-slate-400 uppercase mb-2">真實物理仿印效果</label>
+                    <div class="space-y-4 bg-slate-950 p-4 rounded-lg border border-slate-800">
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="text-[10px] text-slate-400">印泥缺損 / 雜訊 (物理模擬)</span>
+                                <span id="stamp-noise-val" class="text-xs text-red-400 font-mono">15%</span>
+                            </div>
+                            <input type="range" id="stamp-noise" min="0" max="50" step="5" value="15" class="w-full accent-red-500">
+                            <p class="text-[9px] text-slate-500 mt-0.5">模擬印泥墨水不均勻、磨損之老舊真實感。</p>
+                        </div>
+
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="text-[10px] text-slate-400">邊界暈染 / 墨水暈開</span>
+                                <span id="stamp-blur-val" class="text-xs text-red-400 font-mono">0.6px</span>
+                            </div>
+                            <input type="range" id="stamp-blur" min="0" max="2" step="0.1" value="0.6" class="w-full accent-red-500">
+                        </div>
+
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="text-[10px] text-slate-400">隨機旋轉角 (傾斜度)</span>
+                                <span id="stamp-skew-val" class="text-xs text-red-400 font-mono">±2°</span>
+                            </div>
+                            <input type="range" id="stamp-skew" min="0" max="15" step="1" value="2" class="w-full accent-red-500">
+                            <p class="text-[9px] text-slate-500 mt-0.5">每次蓋章時產生隨機細微角度偏差，符合物理真實感。</p>
+                        </div>
+                        
+                        <!-- Color Preset -->
+                        <div>
+                            <span class="text-[10px] text-slate-400 block mb-1.5">印泥顏色調色盤</span>
+                            <div class="flex gap-2.5">
+                                <button class="color-swatch w-7 h-7 rounded-full bg-red-600 border-2 border-white ring-2 ring-red-500/50" data-color="#dc2626" title="經典朱紅"></button>
+                                <button class="color-swatch w-7 h-7 rounded-full bg-red-500 border border-slate-700" data-color="#ef4444" title="明亮鮮紅"></button>
+                                <button class="color-swatch w-7 h-7 rounded-full bg-orange-600 border border-slate-700" data-color="#ea580c" title="橘紅古印"></button>
+                                <button class="color-swatch w-7 h-7 rounded-full bg-blue-700 border border-slate-700" data-color="#1d4ed8" title="事務藍"></button>
+                                <button class="color-swatch w-7 h-7 rounded-full bg-slate-900 border border-slate-700" data-color="#0f172a" title="極致深黑"></button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- TAB 2 CONTENT: ROBOT AUTOMATION -->
+            <div id="tab-robot-content" class="p-5 space-y-5 flex-1 hidden">
+                
+                <!-- Robot Mode Selector -->
+                <div>
+                    <label class="block text-xs font-semibold tracking-wider text-slate-400 uppercase mb-2">自動機器人工作模式</label>
+                    <div class="grid grid-cols-1 gap-2.5">
+                        
+                        <button class="robot-mode-btn text-left p-3.5 rounded-lg border border-red-500/50 bg-red-500/10 hover:bg-red-500/20 transition-all flex items-start gap-3" data-mode="click-stamp">
+                            <div class="p-2 bg-red-600/30 rounded text-red-400 mt-0.5">
+                                <i class="fa-solid fa-arrow-pointer"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-sm font-semibold text-white">手動點擊蓋印 (Click-to-Stamp)</h4>
+                                <p class="text-[11px] text-slate-400 mt-0.5">滑鼠點擊畫布哪裡，機械手臂便自動移動至該處用力蓋下。</p>
+                            </div>
+                        </button>
+
+                        <button class="robot-mode-btn text-left p-3.5 rounded-lg border border-slate-800 bg-slate-950 hover:border-slate-700 transition-all flex items-start gap-3" data-mode="matrix">
+                            <div class="p-2 bg-slate-800 rounded text-slate-400 mt-0.5">
+                                <i class="fa-solid fa-border-all"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-sm font-semibold text-slate-300">完美矩陣蓋印 (Matrix Row/Col)</h4>
+                                <p class="text-[11px] text-slate-400 mt-0.5">機器人根據預設行列數與間距，以極致完美的網格排列印出。</p>
+                            </div>
+                        </button>
+
+                        <button class="robot-mode-btn text-left p-3.5 rounded-lg border border-slate-800 bg-slate-950 hover:border-slate-700 transition-all flex items-start gap-3" data-mode="random">
+                            <div class="p-2 bg-slate-800 rounded text-slate-400 mt-0.5">
+                                <i class="fa-solid fa-shuffle"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-sm font-semibold text-slate-300">隨機瘋狂蓋印 (Chaos Stamper)</h4>
+                                <p class="text-[11px] text-slate-400 mt-0.5">機器人獲得完全自由自主，隨機在畫布各個角落傾斜蓋印。</p>
+                            </div>
+                        </button>
+
+                    </div>
+                </div>
+
+                <!-- Matrix Settings (Shown conditional, let's keep visible as slider when needed) -->
+                <div id="matrix-controls" class="space-y-3 bg-slate-950 p-4 rounded-lg border border-slate-800 hidden">
+                    <span class="text-xs font-semibold text-slate-300 block mb-1">矩陣參數設定</span>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <span class="text-[10px] text-slate-500 block mb-1">橫向列數 (Cols)</span>
+                            <input type="number" id="matrix-cols" min="1" max="6" value="4" class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white">
+                        </div>
+                        <div>
+                            <span class="text-[10px] text-slate-500 block mb-1">縱向行數 (Rows)</span>
+                            <input type="number" id="matrix-rows" min="1" max="8" value="3" class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Robot Speed Controller -->
+                <div>
+                    <label class="block text-xs font-semibold tracking-wider text-slate-400 uppercase mb-2">自動化運作參數</label>
+                    <div class="space-y-4 bg-slate-950 p-4 rounded-lg border border-slate-800">
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="text-[10px] text-slate-400">機器人反應延遲 (Stamping Interval)</span>
+                                <span id="robot-delay-val" class="text-xs text-red-400 font-mono">800 ms</span>
+                            </div>
+                            <input type="range" id="robot-delay" min="150" max="3000" step="50" value="800" class="w-full accent-red-500">
+                            <p class="text-[9px] text-slate-500 mt-0.5">設定蓋完一次章，到下一次移動與蓋章之間的間隔時間。</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Master Controls for Automating -->
+                <div class="pt-2">
+                    <button id="start-robot-btn" class="w-full py-4 rounded-xl font-bold text-white bg-gradient-to-r from-red-600 to-amber-600 hover:from-red-500 hover:to-amber-500 shadow-xl shadow-red-900/20 active:scale-[0.98] transition-all flex items-center justify-center gap-3">
+                        <i class="fa-solid fa-play"></i>
+                        <span>啟動 自動蓋章機器人</span>
+                    </button>
+                    <p class="text-center text-[10px] text-slate-500 mt-2">啟動後，機械手臂會自動在紙張上以高速進行規律/隨機施印</p>
+                </div>
+
+            </div>
+
+            <!-- Document Templates & Actions -->
+            <div class="mt-auto p-5 border-t border-slate-800 bg-slate-950/80 space-y-4">
+                <!-- Select Paper Template -->
+                <div>
+                    <span class="text-[10px] text-slate-400 block mb-1.5 uppercase tracking-wider">背景底圖 (公文文件模擬)</span>
+                    <select id="doc-template" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:ring-1 focus:ring-red-500">
+                        <option value="empty">極簡 空白紙 (空白 A4)</option>
+                        <option value="invoice">【會計事務】 電子統一發票/收執聯</option>
+                        <option value="official">【行政管理】 內部公文簽核呈報單</option>
+                        <option value="approval">【技術專利】 資訊部門研發驗收報告</option>
+                    </select>
+                </div>
+
+                <!-- Reset, Undo, Clear -->
+                <div class="grid grid-cols-2 gap-2">
+                    <button id="undo-btn" class="py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors">
+                        <i class="fa-solid fa-arrow-rotate-left"></i> 復原 (Undo)
+                    </button>
+                    <button id="clear-btn" class="py-2.5 rounded-lg bg-red-950/50 hover:bg-red-900/50 text-red-400 text-xs font-semibold flex items-center justify-center gap-1.5 border border-red-900/30 transition-colors">
+                        <i class="fa-solid fa-trash-can"></i> 清除全部
+                    </button>
+                </div>
+
+                <!-- Export Action -->
+                <button id="download-btn" class="w-full py-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/40 transition-all">
+                    <i class="fa-solid fa-file-arrow-down text-sm"></i>
+                    <span>將蓋章後的文件匯出為 PNG 圖片</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Center/Right Canvas Workspace -->
+        <main class="flex-1 relative bg-slate-950 flex items-center justify-center p-4 md:p-8 overflow-hidden h-1/2 lg:h-full">
+            
+            <!-- Canvas Container -->
+            <div class="relative max-w-full max-h-full bg-white shadow-2xl rounded-sm overflow-hidden aspect-[1/1.414] select-none" id="paper-frame" style="width: 500px; height: 707px;">
+                
+                <!-- SVG Document Background Templates -->
+                <div id="document-mockups" class="absolute inset-0 pointer-events-none select-none z-0">
+                    <!-- Blank Template -->
+                    <div id="template-empty" class="absolute inset-0 bg-stone-50"></div>
+
+                    <!-- Invoice Template -->
+                    <div id="template-invoice" class="absolute inset-0 bg-[#fefdfa] p-8 hidden text-slate-800 flex flex-col">
+                        <div class="border-b-2 border-double border-slate-700 pb-4">
+                            <h2 class="text-center font-bold text-lg tracking-widest text-slate-800">統一發票 (電子收執聯)</h2>
+                            <div class="flex justify-between text-[10px] text-slate-500 mt-2 font-mono">
+                                <span>中華民國一一五年七月廿一日</span>
+                                <span>發票號碼：TW-87654321</span>
+                            </div>
+                        </div>
+                        <div class="my-4 text-xs space-y-1.5 flex-1">
+                            <div class="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
+                                <span>買受人：技術資訊部</span>
+                                <span>統一編號：24681357</span>
+                            </div>
+                            <table class="w-full text-left text-[11px] mt-2">
+                                <thead>
+                                    <tr class="border-b border-slate-300">
+                                        <th class="py-1">品名規格</th>
+                                        <th class="py-1 text-center">數量</th>
+                                        <th class="py-1 text-right">單價</th>
+                                        <th class="py-1 text-right">金額</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr class="text-slate-600">
+                                        <td class="py-1">企業雲端資料庫維護合約 (1年)</td>
+                                        <td class="py-1 text-center">1</td>
+                                        <td class="py-1 text-right">85,000</td>
+                                        <td class="py-1 text-right">85,000</td>
+                                    </tr>
+                                    <tr class="text-slate-600">
+                                        <td class="py-1">前端網頁效能診斷系統授權</td>
+                                        <td class="py-1 text-center">2</td>
+                                        <td class="py-1 text-right">15,000</td>
+                                        <td class="py-1 text-right">30,000</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            
+                            <div class="pt-4 flex flex-col items-end gap-1 border-t border-slate-200">
+                                <span class="text-xs">銷售額合計：NT$ 115,000</span>
+                                <span class="text-xs">營業稅(5%)：NT$ 5,750</span>
+                                <span class="text-sm font-bold text-slate-900">應付總額：NT$ 120,750</span>
+                            </div>
+                        </div>
+                        <!-- Stamp Area Target -->
+                        <div class="border-2 border-dashed border-slate-300 rounded-lg p-3 text-center mb-4 relative">
+                            <span class="text-[9px] text-slate-400 font-bold tracking-widest block uppercase">蓋章專用區 / SIGNATURE AREA</span>
+                            <div class="absolute inset-0 flex items-center justify-center opacity-10">
+                                <i class="fa-solid fa-stamp text-5xl text-slate-900"></i>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Official Form Template -->
+                    <div id="template-official" class="absolute inset-0 bg-[#fcfbfa] p-8 hidden text-slate-900 flex flex-col">
+                        <div class="border-4 border-red-700 p-2 text-center relative">
+                            <span class="absolute top-1 left-2 text-[8px] text-red-600 font-bold border border-red-500 px-1">限期辦理</span>
+                            <h2 class="text-2xl font-black tracking-widest text-red-700">行政呈報公文用箋</h2>
+                        </div>
+                        <div class="mt-4 text-[11px] space-y-2 flex-1">
+                            <div><span class="font-bold">速別：</span>最速件</div>
+                            <div><span class="font-bold">機密等級：</span>普通級</div>
+                            <div><span class="font-bold">主旨：</span>建置資訊人員日常無人值守之自動化系統案，茲檢附完整系統架構，請 鑒核。</div>
+                            <div class="border-t border-slate-300 pt-2 text-slate-600 space-y-2 leading-relaxed">
+                                <p>說明：</p>
+                                <p>一、為提升本處行政及維運效率，本次引進「自動蓋章機器人」原型，提供自動化高速公務壓印與批簽。經評估將可節省約 80% 人工作業耗時。</p>
+                                <p>二、隨文檢附本專案之簽核審查與技術實施報告，請相關資訊主管核准蓋章，以利進一步安排部署與上線事宜。</p>
+                            </div>
+                        </div>
+                        
+                        <!-- Form Stamp blocks -->
+                        <div class="grid grid-cols-3 gap-2 mt-auto border-t border-slate-400 pt-4">
+                            <div class="border border-slate-300 h-20 flex flex-col">
+                                <span class="bg-slate-100 text-[9px] py-1 text-center font-bold text-slate-600 border-b border-slate-300">處長</span>
+                                <div class="flex-1 flex items-center justify-center"></div>
+                            </div>
+                            <div class="border border-slate-300 h-20 flex flex-col">
+                                <span class="bg-slate-100 text-[9px] py-1 text-center font-bold text-slate-600 border-b border-slate-300">部門主管</span>
+                                <div class="flex-1 flex items-center justify-center"></div>
+                            </div>
+                            <div class="border border-slate-300 h-20 flex flex-col">
+                                <span class="bg-slate-100 text-[9px] py-1 text-center font-bold text-slate-600 border-b border-slate-300">承辦資訊人員</span>
+                                <div class="flex-1 flex items-center justify-center"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Technical Approval template -->
+                    <div id="template-approval" class="absolute inset-0 bg-[#fafafa] p-8 hidden text-slate-900 flex flex-col border-t-[8px] border-indigo-600">
+                        <div class="flex justify-between items-start border-b border-slate-200 pb-3">
+                            <div>
+                                <h2 class="text-lg font-extrabold tracking-wide text-slate-800">資訊系統研發驗收報告</h2>
+                                <p class="text-xs text-slate-400 font-mono">Project Code: INF-ROBOT-2026</p>
+                            </div>
+                            <span class="px-2 py-1 bg-indigo-50 text-indigo-700 border border-indigo-200 text-[10px] font-bold rounded-md">結案合格</span>
+                        </div>
+                        <div class="my-4 text-xs space-y-3 flex-1 text-slate-700">
+                            <div>
+                                <h3 class="font-bold text-slate-900 mb-1">■ 系統名稱</h3>
+                                <p>自動蓋章機器人與高仿真朱印演算法渲染模組</p>
+                            </div>
+                            <div>
+                                <h3 class="font-bold text-slate-900 mb-1">■ 測試項目與結論</h3>
+                                <p>1. 印章物理仿真度：高達 98%。包含印泥粗糙度、油墨暈染。測試完成。</p>
+                                <p>2. 機器人自動化延遲率：完美符合 <50ms 運算偏差。自動測試完成。</p>
+                            </div>
+                            <div>
+                                <h3 class="font-bold text-slate-900 mb-1">■ 驗收說明</h3>
+                                <p>本軟硬體整合系統經工程人員測試運作無誤，特此予以簽核確認。請業務負責資訊人員於下方蓋章處施印，以完備行政驗收法效。</p>
+                            </div>
+                        </div>
+
+                        <!-- Huge Stamping Zone -->
+                        <div class="border-2 border-indigo-200 bg-indigo-50/20 rounded-xl p-4 flex items-center justify-between mt-auto">
+                            <div>
+                                <span class="text-xs font-bold text-indigo-900 block">技術驗收施印區</span>
+                                <span class="text-[10px] text-indigo-500">（請在此區域上方蓋印紅色職章）</span>
+                            </div>
+                            <div class="w-24 h-16 border-2 border-dashed border-indigo-300 rounded flex items-center justify-center bg-white text-[9px] text-indigo-300 text-center font-bold">
+                                資訊人員<br>蓋章處
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Main Interactive Stamp Canvas -->
+                <canvas id="stamp-canvas" class="absolute inset-0 z-10 w-full h-full cursor-crosshair"></canvas>
+
+                <!-- STEAMING_CHUNK: Designing the robotic arm UI... -->
+                <!-- Simulated Hovering Robotic Arm Head -->
+                <div id="robot-piston" class="absolute z-20 pointer-events-none opacity-0 select-none transition-opacity duration-300" style="transform: translate(-50%, -50%); width: 220px; height: 220px;">
+                    <!-- Outer Laser Scope Reticle -->
+                    <div class="absolute inset-0 border-2 border-dashed border-red-500/30 rounded-full animate-spin" style="animation-duration: 8s;"></div>
+                    <div class="absolute inset-4 border border-red-400/40 rounded-full pulse-ring"></div>
+                    
+                    <!-- Center Laser dot -->
+                    <div class="absolute left-1/2 top-1/2 w-2 h-2 -ml-1 -mt-1 bg-red-500 rounded-full shadow-[0_0_8px_#ef4444]"></div>
+                    
+                    <!-- Mechanic Stamper Body (SVG) overlay -->
+                    <svg class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-[60%] w-32 h-32 drop-shadow-2xl" viewBox="0 0 100 100">
+                        <!-- Piston rod extending upwards to infinity -->
+                        <rect x="44" y="-120" width="12" height="150" fill="url(#piston-metal)" stroke="#334155" stroke-width="2" />
+                        
+                        <!-- Robotic Head base block -->
+                        <rect x="30" y="30" width="40" height="25" rx="4" fill="#334155" stroke="#1e293b" stroke-width="2" />
+                        <rect x="35" y="35" width="30" height="15" rx="2" fill="#475569" />
+                        
+                        <!-- Pneumatic connections -->
+                        <circle cx="40" cy="42" r="3" fill="#ef4444" />
+                        <path d="M40 42 Q 10 10 0 -50" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" />
+                        <circle cx="60" cy="42" r="3" fill="#3b82f6" />
+                        <path d="M60 42 Q 90 10 100 -50" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" />
+                        
+                        <!-- Hydraulic suspension shock visualizers -->
+                        <rect x="25" y="55" width="8" height="15" fill="#f59e0b" rx="1" />
+                        <rect x="67" y="55" width="8" height="15" fill="#f59e0b" rx="1" />
+                        
+                        <!-- Lower stamp pad assembly -->
+                        <rect x="20" y="70" width="60" height="10" rx="2" fill="#1e293b" />
+                        <rect id="visual-stamp-pad" x="22" y="80" width="56" height="6" fill="#dc2626" rx="1" />
+
+                        <!-- Metallic Gradients definition -->
+                        <defs>
+                            <linearGradient id="piston-metal" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#94a3b8" />
+                                <stop offset="50%" stop-color="#f8fafc" />
+                                <stop offset="100%" stop-color="#475569" />
+                            </linearGradient>
+                        </defs>
+                    </svg>
+
+                    <!-- Realtime Floating Coordinate Coordinates text -->
+                    <div class="absolute bottom-0 left-1/2 -translate-x-1/2 bg-slate-900/90 border border-slate-700 px-2 py-0.5 rounded text-[9px] text-red-400 font-mono tracking-widest flex items-center gap-1">
+                        <span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-ping"></span>
+                        X:<span id="coord-x">0</span> Y:<span id="coord-y">0</span>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+        
+    </div>
+
+    <script>
+        // DOM Elements
+        const canvas = document.getElementById('stamp-canvas');
+        const ctx = canvas.getContext('2d');
+        const paperFrame = document.getElementById('paper-frame');
+        
+        // Form Controls
+        const stampTitle = document.getElementById('stamp-title');
+        const stampName = document.getElementById('stamp-name');
+        const stampLayout = document.getElementById('stamp-layout');
+        const stampWidth = document.getElementById('stamp-width');
+        const stampHeight = document.getElementById('stamp-height');
+        const stampBorder = document.getElementById('stamp-border');
+        const stampRadius = document.getElementById('stamp-radius');
+        const stampNoise = document.getElementById('stamp-noise');
+        const stampBlur = document.getElementById('stamp-blur');
+        const stampSkew = document.getElementById('stamp-skew');
+        const docTemplate = document.getElementById('doc-template');
+        
+        // Buttons
+        const muteBtn = document.getElementById('mute-btn');
+        const muteIcon = document.getElementById('mute-icon');
+        const tabStampBtn = document.getElementById('tab-stamp-btn');
+        const tabRobotBtn = document.getElementById('tab-robot-btn');
+        const tabStampContent = document.getElementById('tab-stamp-content');
+        const tabRobotContent = document.getElementById('tab-robot-content');
+        const undoBtn = document.getElementById('undo-btn');
+        const clearBtn = document.getElementById('clear-btn');
+        const downloadBtn = document.getElementById('download-btn');
+        const startRobotBtn = document.getElementById('start-robot-btn');
+        const statusText = document.getElementById('status-text');
+        const stampCounterEl = document.getElementById('stamp-counter');
+        const matrixControls = document.getElementById('matrix-controls');
+
+        // Dynamic value text indicators
+        const stampWidthVal = document.getElementById('stamp-width-val');
+        const stampHeightVal = document.getElementById('stamp-height-val');
+        const stampBorderVal = document.getElementById('stamp-border-val');
+        const stampRadiusVal = document.getElementById('stamp-radius-val');
+        const stampNoiseVal = document.getElementById('stamp-noise-val');
+        const stampBlurVal = document.getElementById('stamp-blur-val');
+        const stampSkewVal = document.getElementById('stamp-skew-val');
+        const robotDelay = document.getElementById('robot-delay');
+        const robotDelayVal = document.getElementById('robot-delay-val');
+        
+        // Robot Piston Overlay elements
+        const robotPiston = document.getElementById('robot-piston');
+        const coordXEl = document.getElementById('coord-x');
+        const coordYEl = document.getElementById('coord-y');
+        const visualStampPad = document.getElementById('visual-stamp-pad');
+
+        // Application State
+        let selectedColor = '#dc2626'; // Default red
+        let currentMode = 'click-stamp'; // Grid or Random or Click
+        let isRobotRunning = false;
+        let robotTimer = null;
+        let appliedStamps = []; // Array of applied stamp history objects
+
+        // Setup Event Listeners for tabs
+        tabStampBtn.addEventListener('click', () => {
+            tabStampBtn.classList.add('border-red-500', 'text-red-500');
+            tabStampBtn.classList.remove('border-transparent', 'text-slate-400');
+            tabRobotBtn.classList.remove('border-red-500', 'text-red-500');
+            tabRobotBtn.classList.add('border-transparent', 'text-slate-400');
+            tabStampContent.classList.remove('hidden');
+            tabRobotContent.classList.add('hidden');
+            audioSynth.playClick();
+        });
+
+        tabRobotBtn.addEventListener('click', () => {
+            tabRobotBtn.classList.add('border-red-500', 'text-red-500');
+            tabRobotBtn.classList.remove('border-transparent', 'text-slate-400');
+            tabStampBtn.classList.remove('border-red-500', 'text-red-500');
+            tabStampBtn.classList.add('border-transparent', 'text-slate-400');
+            tabRobotContent.classList.remove('hidden');
+            tabStampContent.classList.add('hidden');
+            audioSynth.playClick();
+        });
+
+        // Color Presets Selection
+        document.querySelectorAll('.color-swatch').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('.color-swatch').forEach(b => {
+                    b.classList.remove('border-2', 'border-white', 'ring-2', 'ring-red-500/50');
+                    b.classList.add('border', 'border-slate-700');
+                });
+                btn.classList.add('border-2', 'border-white', 'ring-2', 'ring-red-500/50');
+                btn.classList.remove('border', 'border-slate-700');
+                selectedColor = btn.getAttribute('data-color');
+                visualStampPad.setAttribute('fill', selectedColor);
+                audioSynth.playClick();
+            });
+        });
+
+        // Toggle Audio
+        muteBtn.addEventListener('click', () => {
+            audioSynth.muted = !audioSynth.muted;
+            if (audioSynth.muted) {
+                muteIcon.className = 'fa-solid fa-volume-xmark text-red-400';
+            } else {
+                muteIcon.className = 'fa-solid fa-volume-high text-slate-300';
+            }
+        });
+
+        // Live parameter synchronization UI to range bars
+        const syncValue = (input, display, unit = '') => {
+            input.addEventListener('input', () => {
+                display.textContent = input.value + unit;
+            });
+        };
+        syncValue(stampWidth, stampWidthVal, 'px');
+        syncValue(stampHeight, stampHeightVal, 'px');
+        syncValue(stampBorder, stampBorderVal, 'px');
+        syncValue(stampRadius, stampRadiusVal, 'px');
+        syncValue(stampNoise, stampNoiseVal, '%');
+        syncValue(stampBlur, stampBlurVal, 'px');
+        syncValue(stampSkew, stampSkewVal, '°');
+        syncValue(robotDelay, robotDelayVal, ' ms');
+
+        // Document template picker logic
+        docTemplate.addEventListener('change', () => {
+            const val = docTemplate.value;
+            // Hide all templates
+            document.getElementById('template-empty').classList.add('hidden');
+            document.getElementById('template-invoice').classList.add('hidden');
+            document.getElementById('template-official').classList.add('hidden');
+            document.getElementById('template-approval').classList.add('hidden');
+            
+            // Show selected
+            document.getElementById('template-' + val).classList.remove('hidden');
+            audioSynth.playClick();
+        });
+
+        // Set up canvas sizes and handle high PPI devices
+        function resizeCanvas() {
+            const rect = paperFrame.getBoundingClientRect();
+            // Set canvas logic size to match the frame size exactly
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            redrawCanvas();
+        }
+
+        window.addEventListener('load', () => {
+            resizeCanvas();
+            setTimeout(resizeCanvas, 300); // Re-run to ensure exact bounds
+        });
+        window.addEventListener('resize', resizeCanvas);
+
+        // Drawing a rounded rectangle path helper
+        function drawRoundedRect(c, x, y, w, h, r) {
+            c.beginPath();
+            c.moveTo(x + r, y);
+            c.lineTo(x + w - r, y);
+            c.quadraticCurveTo(x + w, y, x + w, y + r);
+            c.lineTo(x + w, y + h - r);
+            c.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+            c.lineTo(x + r, y + h);
+            c.quadraticCurveTo(x, y + h, x, y + h - r);
+            c.lineTo(x, y + r);
+            c.quadraticCurveTo(x, y, x + r, y);
+            c.closePath();
+        }
+
+        // Render ink distress/grunge noise texture on the Stamp
+        // To make it look like real messy ink, we randomly inject transparency or micro specks of ink
+        function applyStampTextureNoise(tempCtx, x, y, width, height, colorHex, intensity) {
+            if (intensity === 0) return;
+            const imgData = tempCtx.getImageData(x, y, width, height);
+            const data = imgData.data;
+            const threshold = intensity / 100;
+
+            // Simple noise algorithm: scan pixels and manipulate based on opacity
+            for (let i = 0; i < data.length; i += 4) {
+                // If the pixel is not transparent, add randomized distress
+                if (data[i + 3] > 0) {
+                    const rand = Math.random();
+                    if (rand < threshold) {
+                        // Completely erase pixel (simulates dry wood/rubber stamp texture)
+                        data[i + 3] = 0;
+                    } else if (rand < threshold * 1.8) {
+                        // Partially transparent
+                        data[i + 3] = Math.floor(data[i + 3] * 0.4);
+                    }
+                } else {
+                    // Small ink splatter / bleed in empty neighboring pixels
+                    if (Math.random() < 0.0003 * intensity) {
+                        // Translate hex to rgb
+                        const r = parseInt(colorHex.slice(1, 3), 16);
+                        const g = parseInt(colorHex.slice(3, 5), 16);
+                        const b = parseInt(colorHex.slice(5, 7), 16);
+                        data[i] = r;
+                        data[i+1] = g;
+                        data[i+2] = b;
+                        data[i+3] = 120; // partially opaque bleed
+                    }
+                }
+            }
+            tempCtx.putImageData(imgData, x, y);
+        }
+
+        // DRAW AN ENTIRE COMPLETED STAMP TO AN ARBITRARY CANVAS CONTEXT
+        function renderSingleStamp(targetCtx, x, y, settings) {
+            targetCtx.save();
+            
+            // Apply coordinates, shift to center, handle skew/rotation angle
+            targetCtx.translate(x, y);
+            targetCtx.rotate(settings.angle);
+
+            // Create offscreen/temporary canvas for stamping to apply realistic per-pixel distress filtering
+            const tempCanvas = document.createElement('canvas');
+            const pad = 30; // Padding to prevent clipping on tilt/noise splatters
+            tempCanvas.width = settings.width + pad * 2;
+            tempCanvas.height = settings.height + pad * 2;
+            const tempCtx = tempCanvas.getContext('2d');
+            
+            // Shift coordinates to center of offscreen
+            const tx = pad;
+            const ty = pad;
+
+            // Set up font styling for traditional Chinese stamps
+            tempCtx.fillStyle = settings.color;
+            tempCtx.strokeStyle = settings.color;
+            tempCtx.lineWidth = settings.borderWidth;
+            tempCtx.textAlign = "center";
+            tempCtx.textBaseline = "middle";
+
+            // Draw outer border rounded box
+            drawRoundedRect(tempCtx, tx, ty, settings.width, settings.height, settings.radius);
+            tempCtx.stroke();
+
+            // Setup proper text drawing logic for Chinese stamp styles
+            // Traditional stamp style is bold, centered, often serif or kai font
+            const textLayout = settings.layout;
+            const t1 = settings.text1 || "";
+            const t2 = settings.text2 || "";
+
+            if (textLayout === 'double-row' && t1 && t2) {
+                // Two lines layout: Top row is Title (資訊人員), Bottom row is Name (某某某)
+                const fontSize1 = Math.floor(settings.height * 0.24);
+                const fontSize2 = Math.floor(settings.height * 0.32);
+                
+                // Top Title font
+                tempCtx.font = `bold ${fontSize1}px 'DFKai-SB', 'Noto Serif TC', serif`;
+                tempCtx.fillText(t1, tx + settings.width / 2, ty + settings.height * 0.32);
+
+                // Bottom Name font (Bigger and bolder, standard for Chinese signatures)
+                tempCtx.font = `bold ${fontSize2}px 'DFKai-SB', 'Noto Serif TC', serif`;
+                tempCtx.fillText(t2, tx + settings.width / 2, ty + settings.height * 0.72);
+
+                // Draw a very thin separation line between Title and Name (optional, classic style)
+                tempCtx.lineWidth = Math.max(1, settings.borderWidth / 3);
+                tempCtx.beginPath();
+                tempCtx.moveTo(tx + settings.width * 0.1, ty + settings.height * 0.5);
+                tempCtx.lineTo(tx + settings.width * 0.9, ty + settings.height * 0.5);
+                tempCtx.stroke();
+
+            } else {
+                // Single line layout: All on one row "資訊人員 某某某"
+                const combinedText = t1 + " " + t2;
+                const fontSize = Math.floor(settings.height * 0.35);
+                tempCtx.font = `bold ${fontSize}px 'DFKai-SB', 'Noto Serif TC', serif`;
+                tempCtx.fillText(combinedText, tx + settings.width / 2, ty + settings.height / 2);
+            }
+
+            // Apply the pixel grunge/dust simulator noise
+            applyStampTextureNoise(tempCtx, 0, 0, tempCanvas.width, tempCanvas.height, settings.color, settings.noise);
+
+            // Draw offscreen buffer to real canvas context
+            // Blur effect can be achieved using native canvas shadowBlur / filter (where supported)
+            if (settings.blur > 0) {
+                targetCtx.filter = `blur(${settings.blur}px)`;
+            }
+            
+            // Draw center aligned to target (offset padding)
+            targetCtx.drawImage(tempCanvas, -tempCanvas.width / 2, -tempCanvas.height / 2);
+            
+            targetCtx.restore();
+        }
+
+        // Redraw canvas from scratch: background template layer followed by each dynamic stamp history item
+        function redrawCanvas() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw every stamp currently recorded in memory
+            appliedStamps.forEach(stamp => {
+                renderSingleStamp(ctx, stamp.x, stamp.y, stamp.settings);
+            });
+        }
+
+        // Simulate physical piston head movements and stamping action
+        function triggerRobotStampAction(targetX, targetY, isManual = false) {
+            // Display robotic cursor state
+            robotPiston.style.opacity = '1';
+            
+            // Set coordinate readouts
+            coordXEl.textContent = Math.round(targetX);
+            coordYEl.textContent = Math.round(targetY);
+
+            // Animate mechanical arm movement (Translate CSS left/top nicely)
+            robotPiston.style.left = targetX + 'px';
+            robotPiston.style.top = targetY + 'px';
+
+            // Start physical slamming animation on stamp
+            setTimeout(() => {
+                robotPiston.classList.remove('animate-slam');
+                void robotPiston.offsetWidth; // Trigger reflow
+                robotPiston.classList.add('animate-slam');
+
+                // Play satisfaction pneumatic thump clank
+                audioSynth.playStampingSound();
+
+                // Compute parameters with minor mechanical deviation noise
+                const maxAngleDeviation = parseFloat(stampSkew.value) * (Math.PI / 180); // To radians
+                const angleNoise = (Math.random() * 2 - 1) * maxAngleDeviation;
+
+                const stampSettings = {
+                    text1: stampTitle.value,
+                    text2: stampName.value,
+                    layout: stampLayout.value,
+                    width: parseInt(stampWidth.value),
+                    height: parseInt(stampHeight.value),
+                    borderWidth: parseInt(stampBorder.value),
+                    radius: parseInt(stampRadius.value),
+                    color: selectedColor,
+                    noise: parseInt(stampNoise.value),
+                    blur: parseFloat(stampBlur.value),
+                    angle: angleNoise,
+                };
+
+                // Store stamp coordinates and data in array
+                appliedStamps.push({
+                    x: targetX,
+                    y: targetY,
+                    settings: stampSettings
+                });
+
+                // Update UI counter
+                stampCounterEl.textContent = appliedStamps.length;
+
+                // Redraw whole board
+                redrawCanvas();
+
+                // Create digital dynamic shockwave particle on document
+                createStampShockwave(targetX, targetY, stampSettings.color);
+
+            }, 100); // Small duration delay to let piston shift to position first
+        }
+
+        // Splattering shockwave effect
+        function createStampShockwave(x, y, color) {
+            const shockwave = document.createElement('div');
+            shockwave.className = 'absolute pointer-events-none rounded-full z-30 opacity-80 border-2 transition-all duration-500';
+            shockwave.style.borderColor = color;
+            shockwave.style.width = '20px';
+            shockwave.style.height = '20px';
+            shockwave.style.left = x + 'px';
+            shockwave.style.top = y + 'px';
+            shockwave.style.transform = 'translate(-50%, -50%) scale(1)';
+            
+            paperFrame.appendChild(shockwave);
+
+            // Trigger animation expansion
+            setTimeout(() => {
+                shockwave.style.transform = 'translate(-50%, -50%) scale(5)';
+                shockwave.style.opacity = '0';
+            }, 10);
+
+            // Clean up
+            setTimeout(() => {
+                shockwave.remove();
+            }, 600);
+        }
+
+        // Automated robot routines
+        function stopRobot() {
+            if (!isRobotRunning) return;
+            isRobotRunning = false;
+            clearInterval(robotTimer);
+            robotTimer = null;
+            
+            // Reset button UI
+            startRobotBtn.className = "w-full py-4 rounded-xl font-bold text-white bg-gradient-to-r from-red-600 to-amber-600 hover:from-red-500 hover:to-amber-500 shadow-xl shadow-red-900/20 active:scale-[0.98] transition-all flex items-center justify-center gap-3";
+            startRobotBtn.innerHTML = `<i class="fa-solid fa-play"></i><span>啟動 自動蓋章機器人</span>`;
+            
+            statusText.textContent = "隨時待命 (IDLE)";
+            statusText.className = "text-emerald-400 font-semibold";
+            robotPiston.style.opacity = '0'; // Hide robotic arm
+            audioSynth.playClick();
+        }
+
+        function runRobotAutomation() {
+            if (isRobotRunning) {
+                stopRobot();
+                return;
+            }
+
+            isRobotRunning = true;
+            audioSynth.playClick();
+
+            // Toggle Button Styling
+            startRobotBtn.className = "w-full py-4 rounded-xl font-bold text-white bg-gradient-to-r from-slate-700 to-slate-800 hover:from-slate-600 hover:to-slate-700 active:scale-[0.98] transition-all flex items-center justify-center gap-3 border border-slate-600";
+            startRobotBtn.innerHTML = `<i class="fa-solid fa-square-term"></i><span>停止 機器人作業</span>`;
+            
+            statusText.textContent = "正在自動量產 (STAMPING...)";
+            statusText.className = "text-amber-400 font-semibold";
+
+            const interval = parseInt(robotDelay.value);
+
+            if (currentMode === 'random') {
+                // Chaotic Random Stamping routine
+                robotTimer = setInterval(() => {
+                    const rx = 50 + Math.random() * (canvas.width - 100);
+                    const ry = 50 + Math.random() * (canvas.height - 100);
+                    triggerRobotStampAction(rx, ry);
+                }, interval);
+
+            } else if (currentMode === 'matrix') {
+                // Orderly grid stamping layout sequence
+                const cols = parseInt(document.getElementById('matrix-cols').value) || 4;
+                const rows = parseInt(document.getElementById('matrix-rows').value) || 3;
+                
+                // Calculate spacing
+                const cellW = canvas.width / (cols + 1);
+                const cellH = canvas.height / (rows + 1);
+                
+                let currentCellX = 1;
+                let currentCellY = 1;
+
+                robotTimer = setInterval(() => {
+                    const tx = cellW * currentCellX;
+                    const ty = cellH * currentCellY;
+                    
+                    triggerRobotStampAction(tx, ty);
+
+                    // Move to next cell in matrix
+                    currentCellX++;
+                    if (currentCellX > cols) {
+                        currentCellX = 1;
+                        currentCellY++;
+                    }
+
+                    // Complete checklist
+                    if (currentCellY > rows) {
+                        // Loop complete, stop automatically
+                        stopRobot();
+                    }
+                }, interval);
+            } else {
+                // If on manual 'click-stamp' mode and clicked start robot, do random sequence
+                currentMode = 'random';
+                updateModeButtonsUI();
+                runRobotAutomation();
+            }
+        }
+
+        startRobotBtn.addEventListener('click', runRobotAutomation);
+
+        // Control Panel Work Mode selector
+        const modeButtons = document.querySelectorAll('.robot-mode-btn');
+        function updateModeButtonsUI() {
+            modeButtons.forEach(btn => {
+                const mode = btn.getAttribute('data-mode');
+                if (mode === currentMode) {
+                    btn.className = "robot-mode-btn text-left p-3.5 rounded-lg border border-red-500 bg-red-500/10 transition-all flex items-start gap-3";
+                    btn.querySelector('.p-2').className = "p-2 bg-red-600/30 rounded text-red-400 mt-0.5";
+                    btn.querySelector('h4').className = "text-sm font-semibold text-white";
+                } else {
+                    btn.className = "robot-mode-btn text-left p-3.5 rounded-lg border border-slate-800 bg-slate-950 hover:border-slate-700 transition-all flex items-start gap-3";
+                    btn.querySelector('.p-2').className = "p-2 bg-slate-800 rounded text-slate-400 mt-0.5";
+                    btn.querySelector('h4').className = "text-sm font-semibold text-slate-300";
+                }
+            });
+
+            // Toggle grid config block display
+            if (currentMode === 'matrix') {
+                matrixControls.classList.remove('hidden');
+            } else {
+                matrixControls.classList.add('hidden');
+            }
+        }
+
+        modeButtons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (isRobotRunning) stopRobot();
+                currentMode = btn.getAttribute('data-mode');
+                updateModeButtonsUI();
+                audioSynth.playClick();
+            });
+        });
+
+        // User Interactive click/tap directly on Canvas Workspace
+        canvas.addEventListener('click', (e) => {
+            if (isRobotRunning) return; // Ignore input while automated robotic sequence is operational
+
+            const rect = canvas.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const clickY = e.clientY - rect.top;
+
+            triggerRobotStampAction(clickX, clickY, true);
+        });
+
+        // Track mouse coordinates on canvas to update robotic arm simulation floating position
+        canvas.addEventListener('mousemove', (e) => {
+            if (isRobotRunning) return; // Robot controls itself during auto-modes
+            
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            robotPiston.style.opacity = '1';
+            robotPiston.style.left = mouseX + 'px';
+            robotPiston.style.top = mouseY + 'px';
+
+            coordXEl.textContent = Math.round(mouseX);
+            coordYEl.textContent = Math.round(mouseY);
+        });
+
+        // Hide robotic arm if mouse exits canvas zone
+        canvas.addEventListener('mouseleave', () => {
+            if (isRobotRunning) return;
+            robotPiston.style.opacity = '0';
+        });
+
+        // Undo & Clear functions
+        undoBtn.addEventListener('click', () => {
+            if (appliedStamps.length > 0) {
+                appliedStamps.pop();
+                stampCounterEl.textContent = appliedStamps.length;
+                redrawCanvas();
+                audioSynth.playClick();
+            }
+        });
+
+        clearBtn.addEventListener('click', () => {
+            if (appliedStamps.length > 0) {
+                appliedStamps = [];
+                stampCounterEl.textContent = '0';
+                redrawCanvas();
+                audioSynth.playClick();
+            }
+        });
+
+        // EXPORT DOCUMENT TO PHYSICAL FILE AS A BEAUTIFUL HIGH-RESOLUTION PNG
+        downloadBtn.addEventListener('click', () => {
+            audioSynth.playClick();
+            
+            // To export both the document template background AND the stamps drawn on canvas, 
+            // we will create an overlay render canvas of high quality, render template layout, then draw stamps on top.
+            const exportCanvas = document.createElement('canvas');
+            exportCanvas.width = canvas.width;
+            exportCanvas.height = canvas.height;
+            const exportCtx = exportCanvas.getContext('2d');
+
+            // Draw template background first
+            const templateVal = docTemplate.value;
+            
+            if (templateVal === 'empty') {
+                exportCtx.fillStyle = '#f5f5f4'; // Stone-100 style paper
+                exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+                completeExport();
+            } else {
+                // For HTML document templates, we'll draw them as solid raster or stylized textures on the canvas context.
+                // We recreate the design directly inside the context of the output canvas.
+                exportCtx.fillStyle = '#fffdfa'; // Paper tint
+                exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+                
+                // Add watermark lines/margins for realistic look
+                if (templateVal === 'invoice') {
+                    // Title Header
+                    exportCtx.strokeStyle = '#334155';
+                    exportCtx.lineWidth = 2;
+                    exportCtx.beginPath();
+                    exportCtx.moveTo(30, 80);
+                    exportCtx.lineTo(exportCanvas.width - 30, 80);
+                    exportCtx.stroke();
+
+                    exportCtx.fillStyle = '#1e293b';
+                    exportCtx.font = "bold 18px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("統一發票 (電子收執聯)", exportCanvas.width / 2, 50);
+
+                    exportCtx.fillStyle = '#64748b';
+                    exportCtx.font = "10px monospace";
+                    exportCtx.fillText("中華民國一一五年七月廿一日", 30, 100);
+                    exportCtx.fillText("發票號碼：TW-87654321", exportCanvas.width - 150, 100);
+
+                    // Details
+                    exportCtx.fillStyle = '#1e293b';
+                    exportCtx.font = "11px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("買受人：技術資訊部", 30, 140);
+                    exportCtx.fillText("統一編號：24681357", exportCanvas.width - 150, 140);
+
+                    // Table Header
+                    exportCtx.strokeStyle = '#94a3b8';
+                    exportCtx.lineWidth = 1;
+                    exportCtx.beginPath();
+                    exportCtx.moveTo(30, 170);
+                    exportCtx.lineTo(exportCanvas.width - 30, 170);
+                    exportCtx.moveTo(30, 195);
+                    exportCtx.lineTo(exportCanvas.width - 30, 195);
+                    exportCtx.stroke();
+
+                    exportCtx.font = "bold 11px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("品名規格", 40, 182);
+                    exportCtx.fillText("數量", exportCanvas.width - 150, 182);
+                    exportCtx.fillText("金額", exportCanvas.width - 70, 182);
+
+                    exportCtx.font = "11px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillStyle = '#475569';
+                    exportCtx.fillText("企業雲端資料庫維護合約 (1年)", 40, 215);
+                    exportCtx.fillText("1", exportCanvas.width - 145, 215);
+                    exportCtx.fillText("85,000", exportCanvas.width - 75, 215);
+
+                    exportCtx.fillText("前端網頁效能診斷系統授權", 40, 240);
+                    exportCtx.fillText("2", exportCanvas.width - 145, 240);
+                    exportCtx.fillText("30,000", exportCanvas.width - 75, 240);
+
+                    // Bottom divider and total
+                    exportCtx.strokeStyle = '#cbd5e1';
+                    exportCtx.beginPath();
+                    exportCtx.moveTo(exportCanvas.width - 200, 270);
+                    exportCtx.lineTo(exportCanvas.width - 30, 270);
+                    exportCtx.stroke();
+
+                    exportCtx.font = "bold 12px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillStyle = '#0f172a';
+                    exportCtx.fillText("應付總額：NT$ 120,750", exportCanvas.width - 180, 290);
+
+                    // Dotted Sign area
+                    exportCtx.strokeStyle = '#cbd5e1';
+                    exportCtx.setLineDash([4, 4]);
+                    drawRoundedRect(exportCtx, 30, exportCanvas.height - 120, exportCanvas.width - 60, 90, 8);
+                    exportCtx.stroke();
+                    exportCtx.setLineDash([]); // clear dash
+                    exportCtx.fillStyle = '#94a3b8';
+                    exportCtx.font = "bold 9px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("蓋章專用區 / SIGNATURE AREA", exportCanvas.width / 2, exportCanvas.height - 105);
+
+                } else if (templateVal === 'official') {
+                    // Red Border top
+                    exportCtx.strokeStyle = '#b91c1c';
+                    exportCtx.lineWidth = 4;
+                    exportCtx.strokeRect(30, 30, exportCanvas.width - 60, 60);
+
+                    exportCtx.fillStyle = '#b91c1c';
+                    exportCtx.font = "black 22px 'Noto Sans TC', sans-serif";
+                    exportCtx.textAlign = 'center';
+                    exportCtx.fillText("行政呈報公文用箋", exportCanvas.width / 2, 68);
+
+                    exportCtx.textAlign = 'left';
+                    exportCtx.fillStyle = '#0f172a';
+                    exportCtx.font = "bold 11px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("速別：最速件", 40, 120);
+                    exportCtx.fillText("密等：普通級", 40, 140);
+                    
+                    exportCtx.fillText("主旨：建置資訊人員日常無人值守之自動化系統案，請 鑒核。", 40, 170);
+
+                    // Horizontal separating line
+                    exportCtx.strokeStyle = '#cbd5e1';
+                    exportCtx.lineWidth = 1;
+                    exportCtx.beginPath();
+                    exportCtx.moveTo(40, 190);
+                    exportCtx.lineTo(exportCanvas.width - 40, 190);
+                    exportCtx.stroke();
+
+                    exportCtx.fillText("說明：", 40, 215);
+                    exportCtx.font = "11px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillStyle = '#334155';
+                    
+                    // Paragraphs
+                    const p1 = "一、為提升本處行政及維運效率，本次引進「自動蓋章機器人」原型，";
+                    const p1_2 = "    提供自動化高速公務壓印與批簽。經評估將可節省約 80% 人工作業耗時。";
+                    const p2 = "二、隨文檢附本專案之簽核審查與技術實施報告，請相關資訊主管核准蓋章，";
+                    const p2_2 = "    以利進一步安排部署與上線事宜。";
+
+                    exportCtx.fillText(p1, 40, 240);
+                    exportCtx.fillText(p1_2, 40, 258);
+                    exportCtx.fillText(p2, 40, 285);
+                    exportCtx.fillText(p2_2, 40, 303);
+
+                    // Draw bottom workflow table rows
+                    const cellW = (exportCanvas.width - 80) / 3;
+                    const tableY = exportCanvas.height - 130;
+
+                    for (let i = 0; i < 3; i++) {
+                        exportCtx.strokeStyle = '#cbd5e1';
+                        exportCtx.strokeRect(40 + i * cellW, tableY, cellW, 90);
+                        exportCtx.fillStyle = '#f8fafc';
+                        exportCtx.fillRect(41 + i * cellW, tableY + 1, cellW - 2, 22);
+                        
+                        exportCtx.fillStyle = '#475569';
+                        exportCtx.font = "bold 9px 'Noto Sans TC', sans-serif";
+                        exportCtx.textAlign = 'center';
+                        let label = "承辦資訊人員";
+                        if (i === 0) label = "處長";
+                        if (i === 1) label = "部門主管";
+                        exportCtx.fillText(label, 40 + i * cellW + cellW/2, tableY + 15);
+                    }
+
+                } else if (templateVal === 'approval') {
+                    // Technical Approval template
+                    exportCtx.fillStyle = '#4f46e5';
+                    exportCtx.fillRect(0, 0, exportCanvas.width, 8);
+
+                    exportCtx.fillStyle = '#1e293b';
+                    exportCtx.font = "bold 16px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("資訊系統研發驗收報告", 30, 40);
+
+                    exportCtx.fillStyle = '#94a3b8';
+                    exportCtx.font = "9px monospace";
+                    exportCtx.fillText("Project Code: INF-ROBOT-2026", 30, 58);
+
+                    exportCtx.fillStyle = '#0f172a';
+                    exportCtx.font = "bold 12px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("■ 系統名稱", 30, 100);
+                    exportCtx.font = "11px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillStyle = '#475569';
+                    exportCtx.fillText("自動蓋章機器人與高仿真朱印演算法渲染模組", 30, 120);
+
+                    exportCtx.fillStyle = '#0f172a';
+                    exportCtx.font = "bold 12px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("■ 測試項目與結論", 30, 160);
+                    exportCtx.font = "11px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillStyle = '#475569';
+                    exportCtx.fillText("1. 印章物理仿真度：高達 98%。包含印泥粗糙度、油墨暈染。測試完成。", 30, 180);
+                    exportCtx.fillText("2. 機器人自動化延遲率：完美符合 <50ms 運算偏差。自動測試完成。", 30, 200);
+
+                    exportCtx.fillStyle = '#0f172a';
+                    exportCtx.font = "bold 12px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("■ 驗收說明", 30, 240);
+                    exportCtx.font = "11px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillStyle = '#475569';
+                    
+                    const textLines = [
+                        "本軟硬體整合系統經工程人員測試運作無誤，特此予以簽核確認。",
+                        "請業務負責資訊人員於下方蓋章處施印，以完備行政驗收法效。"
+                    ];
+                    exportCtx.fillText(textLines[0], 30, 260);
+                    exportCtx.fillText(textLines[1], 30, 278);
+
+                    // Technical stamping zone box
+                    exportCtx.fillStyle = '#f5f3ff';
+                    exportCtx.fillRect(30, exportCanvas.height - 120, exportCanvas.width - 60, 90);
+                    exportCtx.strokeStyle = '#ddd6fe';
+                    exportCtx.strokeRect(30, exportCanvas.height - 120, exportCanvas.width - 60, 90);
+
+                    exportCtx.fillStyle = '#312e81';
+                    exportCtx.font = "bold 12px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("技術驗收施印區", 45, exportCanvas.height - 85);
+                    exportCtx.fillStyle = '#6366f1';
+                    exportCtx.font = "10px 'Noto Sans TC', sans-serif";
+                    exportCtx.fillText("（請在此區域上方蓋印紅色職章）", 45, exportCanvas.height - 65);
+
+                    // Target Box
+                    exportCtx.strokeStyle = '#c7d2fe';
+                    exportCtx.strokeRect(exportCanvas.width - 120, exportCanvas.height - 110, 80, 70);
+                    exportCtx.fillStyle = '#a5b4fc';
+                    exportCtx.font = "bold 9px 'Noto Sans TC', sans-serif";
+                    exportCtx.textAlign = 'center';
+                    exportCtx.fillText("資訊人員", exportCanvas.width - 80, exportCanvas.height - 85);
+                    exportCtx.fillText("蓋章處", exportCanvas.width - 80, exportCanvas.height - 65);
+                }
+
+                completeExport();
+            }
+
+            function completeExport() {
+                // Now, draw all applied stamps onto the final output canvas
+                appliedStamps.forEach(stamp => {
+                    renderSingleStamp(exportCtx, stamp.x, stamp.y, stamp.settings);
+                });
+
+                // Generate image download
+                const dataURL = exportCanvas.toDataURL('image/png');
+                
+                // Classic iframe-safe link trigger
+                const link = document.createElement('a');
+                link.download = `自動蓋章文件_${new Date().toISOString().slice(0,10)}.png`;
+                link.href = dataURL;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+        });
+    </script>
+</body>
+</html>
